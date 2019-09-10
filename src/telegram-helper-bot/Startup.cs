@@ -1,20 +1,19 @@
 ﻿using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Threading.Tasks;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
-using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
-using Microsoft.Extensions.Logging;
+using Telegram.Bot.Framework;
+using ElenaHelperBot.Options;
+using ElenaHelperBot.Handlers;
+using ElenaHelperBot.Services;
+using Telegram.Bot.Framework.Abstractions;
+using Microsoft.AspNetCore.Http;
 
-namespace telegram_helper_bot
+namespace ElenaHelperBot
 {
     public class Startup
     {
-        public const string AppS3BucketKey = "AppS3Bucket";
-
         public Startup(IConfiguration configuration)
         {
             Configuration = configuration;
@@ -22,29 +21,60 @@ namespace telegram_helper_bot
 
         public static IConfiguration Configuration { get; private set; }
 
-        // This method gets called by the runtime. Use this method to add services to the container
         public void ConfigureServices(IServiceCollection services)
         {
-            services.AddMvc().SetCompatibilityVersion(CompatibilityVersion.Version_2_1);
+            services.AddTransient<ElenaHelperBot>()
+                .Configure<BotOptions<ElenaHelperBot>>(Configuration.GetSection("Bot"))
+                .Configure<CustomBotOptions<ElenaHelperBot>>(Configuration.GetSection("Bot"))
+                .AddScoped<StartCommand>()
+                .AddScoped<InfoCommand>()
+                .AddScoped<UpdateLogger>()
+                .AddScoped<ExceptionHandler>()
+                .AddScoped<CallbackQueryHandler>();
 
-            // Add S3 to the ASP.NET Core dependency injection framework.
-            services.AddAWSService<Amazon.S3.IAmazonS3>();
+            services.AddScoped<IInlineMarkupService, InlineMarkupService>();
+            services.AddScoped<IDescriptionTextService, DescriptionTextService>();
         }
 
-        // This method gets called by the runtime. Use this method to configure the HTTP request pipeline
         public void Configure(IApplicationBuilder app, IHostingEnvironment env)
         {
             if (env.IsDevelopment())
             {
                 app.UseDeveloperExceptionPage();
+
+                app.EnsureWebhookUnset<ElenaHelperBot>();
+
+                // get bot updates from Telegram via long-polling approach during development
+                // this will disable Telegram webhooks
+                app.UseTelegramBotLongPolling<ElenaHelperBot>(ConfigureBot(), startAfter: TimeSpan.FromSeconds(2));
             }
             else
             {
-                app.UseHsts();
+                // use Telegram bot webhook middleware in higher environments
+                app.UseTelegramBotWebhook<ElenaHelperBot>(ConfigureBot());
+                // and make sure webhook is enabled
+                app.EnsureWebhookSet<ElenaHelperBot>();
             }
 
-            app.UseHttpsRedirection();
-            app.UseMvc();
+            app.Run(async context => { await context.Response.WriteAsync("Hello World!"); });
+        }
+
+        private IBotBuilder ConfigureBot()
+        {
+            return new BotBuilder()
+                .Use<ExceptionHandler>()
+                .Use<UpdateLogger>()
+
+                // .Use<CustomUpdateLogger>()
+                .UseWhen(When.NewMessage, msgBranch => msgBranch
+                    .UseWhen(When.NewTextMessage, txtBranch => txtBranch
+                            .UseWhen(When.NewCommand, cmdBranch => cmdBranch
+                                .UseCommand<StartCommand>("start")
+                                .UseCommand<InfoCommand>("info")
+                            )
+                    )
+                )
+                .UseWhen<CallbackQueryHandler>(When.CallbackQuery);
         }
     }
 }
